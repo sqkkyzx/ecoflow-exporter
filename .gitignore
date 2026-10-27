@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+config/profile.json
+config/mac-system-roots.pem
+work/
+secrets/
+artifacts/
+local/
+probe/ecoflow-wifi-cloud-probe/results/
+metrics-live-example.prom
+validation/live-validation.json
+docs/CONVERSATION_KEY_POINTS.md

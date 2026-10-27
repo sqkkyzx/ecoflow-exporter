@@ -1,0 +1,14 @@
+# The build context is an allowlist. Credentials, result logs and tests stay out.
+**
+!Dockerfile
+!requirements.txt
+!exporter.py
+!protocol.py
+!recovery.py
+!metrics.py
+!LICENSE
+!NOTICE
+!vendor/
+!vendor/ef_river3.proto
+!vendor/ef_river3_pb2.py
+!vendor/LICENSE

@@ -1,0 +1,11 @@
+EcoFlow Exporter
+
+Exporter code is licensed under Apache-2.0.
+
+The vendor/ef_river3.proto and vendor/ef_river3_pb2.py files are copied without modification from:
+https://github.com/tolwi/hassio-ecoflow-cloud/tree/de02d680cdfe1adcec60c43047ff3ed3da15e0ee
+Licensed under Apache-2.0; original license retained in vendor/LICENSE.
+
+Protobuf GET envelope follows the River 3 read path in:
+https://github.com/foxthefox/ioBroker.ecoflow-mqtt/blob/9df54323e17a90e5c553ba5f10771667bd9ac4fb/lib/dict_data/ef_river3_data.js
+No device-control command implementation is included.

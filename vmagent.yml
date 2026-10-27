@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 5s
+
+scrape_configs:
+  - job_name: ecoflow
+    metrics_path: /metrics
+    static_configs:
+      # This DNS name works when vmagent and the exporter share a Docker network.
+      # For vmagent outside that network, use the exporter host's IP:9098.
+      - targets:
+          - ecoflow-exporter:9098
