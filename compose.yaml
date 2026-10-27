@@ -2,7 +2,7 @@ services:
   ecoflow-exporter:
     build:
       context: .
-    image: ecoflow-exporter:local
+    image: ghcr.io/sqkkyzx/ecoflow-exporter:latest
     restart: unless-stopped
     init: true
     user: "10001:10001"

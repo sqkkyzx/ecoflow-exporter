@@ -29,6 +29,15 @@ docker compose logs -f ecoflow-exporter
 curl -fsS http://127.0.0.1:9098/metrics
 ```
 
+要使用 GitHub Container Registry 發布的映像，改為：
+
+```sh
+docker compose pull
+docker compose up -d --no-build
+```
+
+發布標籤包括 `latest`（僅 `main`）、`main`、Git tag（例如 `v0.1.0`）及 `sha-<commit>`。PR 只建置驗證，不會推送映像。GHCR 映像：[`ghcr.io/sqkkyzx/ecoflow-exporter`](https://ghcr.io/sqkkyzx/ecoflow-exporter)。
+
 容器使用 UID/GID 10001、唯讀檔案系統，移除 Linux capabilities，無需特權模式、藍牙、USB 或 host network。映像內只複製程式與協議 schema，不包含 `.env`、secrets 或測試結果。
 
 ## Docker：使用 secrets 檔案
