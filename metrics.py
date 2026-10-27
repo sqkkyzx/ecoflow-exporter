@@ -113,6 +113,10 @@ class _EcoFlowCollector:
         ready_transport = connected and subscribed
         labels = [device]
 
+        probe_success = snapshot.get("probe_success")
+        if isinstance(probe_success, bool):
+            yield _gauge("probe_success", "Whether fresh core telemetry is available for this probe.",
+                         labels, int(probe_success))
         yield _gauge("ecoflow_mqtt_connected", "Whether the MQTT connection is established.", labels, int(connected))
         yield _gauge("ecoflow_mqtt_subscribed", "Whether the device subscriptions are acknowledged.", labels, int(subscribed))
         yield _gauge("ecoflow_login_success", "Whether the most recent account login succeeded.", labels,

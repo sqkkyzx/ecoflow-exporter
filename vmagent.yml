@@ -4,9 +4,29 @@ global:
 
 scrape_configs:
   - job_name: ecoflow
-    metrics_path: /metrics
+    metrics_path: /probe
+    scrape_interval: 15s
+    scrape_timeout: 5s
     static_configs:
-      # This DNS name works when vmagent and the exporter share a Docker network.
-      # For vmagent outside that network, use the exporter host's IP:9098.
-      - targets:
-          - ecoflow-exporter:9098
+      - targets: ['ecoflow-exporter:9098']
+        labels:
+          account: 'YOUR_CN_PHONE_NUMBER'
+          password: 'YOUR_ECOFLOW_APP_PASSWORD'
+          sn: R655YOURDEVICE
+          device_name: river3
+          api_host: api-cn.ecoflow.com
+    relabel_configs:
+      - source_labels: [account]
+        target_label: __param_account
+      - source_labels: [password]
+        target_label: __param_password
+      - source_labels: [sn]
+        target_label: __param_sn
+      - source_labels: [device_name]
+        target_label: __param_device_name
+      - source_labels: [api_host]
+        target_label: __param_api_host
+      - source_labels: [sn]
+        target_label: instance
+      - action: labeldrop
+        regex: 'password|sn|device_name|api_host'

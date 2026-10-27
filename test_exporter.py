@@ -6,12 +6,14 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from unittest.mock import patch
 
 from prometheus_client.parser import text_string_to_metric_families
 
-from exporter import CloudAPI, CloudError, Collector, Config, ConfigError, http_server
+from exporter import (CloudAPI, CloudError, Collector, Config, ConfigError, ServerConfig,
+                      SessionPool, config_fingerprint, http_server)
 from metrics import render_metrics
 from recovery import missing_or_stale
 import protocol
@@ -174,6 +176,125 @@ class HTTPTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
         finally:
             collector.stop()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+
+class ProbeSessionTests(unittest.TestCase):
+    class FakeCollector:
+        created = []
+
+        def __init__(self, config):
+            self.config = config
+            self.started = self.stopped = 0
+            self.created.append(self)
+
+        def start(self):
+            self.started += 1
+
+        def stop(self):
+            self.stopped += 1
+
+        def ready(self):
+            return False
+
+        def snapshot(self):
+            return {"device": self.config.device_name, "connected": False, "subscribed": False,
+                    "login_ok": False, "now": 1000, "stale_seconds": 120,
+                    "last_live_timestamp": None, "values": {}, "counters": {}}
+
+    def setUp(self):
+        self.FakeCollector.created = []
+        self.now = [1000.0]
+        settings = ServerConfig(session_ttl_seconds=60, max_sessions=4)
+        self.pool = SessionPool(settings, collector_factory=self.FakeCollector, clock=lambda: self.now[0])
+
+    def config(self, password="PASSWORD", sn="R655TEST1234", name="river3"):
+        return Config.from_probe({"account": "+86 13800000000", "password": password,
+                                  "sn": sn, "device_name": name}, self.pool.settings)
+
+    def test_same_configuration_reuses_collector_and_refreshes_lease(self):
+        config = self.config()
+        self.pool.snapshot(config)
+        self.now[0] += 30
+        self.pool.snapshot(self.config(name="ups"))
+        self.assertEqual(len(self.FakeCollector.created), 1)
+        self.assertEqual(self.FakeCollector.created[0].started, 1)
+        self.assertEqual(self.FakeCollector.created[0].config.device_name, "river3")
+
+    def test_changed_secret_or_sn_gets_a_distinct_collector(self):
+        self.pool.snapshot(self.config())
+        self.pool.snapshot(self.config(password="OTHER"))
+        self.pool.snapshot(self.config(sn="R654TEST5678"))
+        self.assertEqual(len(self.FakeCollector.created), 3)
+
+    def test_simultaneous_first_scrapes_create_only_one_session(self):
+        config = self.config()
+        barrier = threading.Barrier(12)
+        results = []
+        def request():
+            barrier.wait()
+            results.append(self.pool.get(config))
+        workers = [threading.Thread(target=request) for _ in range(12)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=2)
+        self.assertEqual(len(self.FakeCollector.created), 1)
+        self.assertTrue(all(item is self.FakeCollector.created[0] for item in results))
+
+    def test_fingerprint_is_not_a_plaintext_credential_and_ignores_display_name(self):
+        first = self.config(name="ups-one")
+        second = self.config(name="ups-two")
+        fingerprint = config_fingerprint(first)
+        self.assertEqual(fingerprint, config_fingerprint(second))
+        for secret in (first.account, first.password, first.sn):
+            self.assertNotIn(secret, fingerprint)
+
+    def test_idle_session_is_stopped_and_recreated(self):
+        config = self.config()
+        self.pool.snapshot(config)
+        self.now[0] += 61
+        self.assertEqual(self.pool.reap(), 1)
+        self.assertEqual(self.FakeCollector.created[0].stopped, 1)
+        self.pool.snapshot(config)
+        self.assertEqual(len(self.FakeCollector.created), 2)
+
+    def test_probe_http_reuses_session_and_does_not_return_credentials(self):
+        server = http_server(self.pool, "127.0.0.1", 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        query = urllib.parse.urlencode({"account": "13800000000", "password": "PRIVATE_PASSWORD",
+                                        "sn": "R655TEST1234", "device_name": "ups"})
+        local = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            for _ in range(2):
+                with local.open(f"http://127.0.0.1:{server.server_port}/probe?{query}", timeout=2) as response:
+                    body = response.read()
+                    self.assertEqual(response.status, 200)
+                    self.assertNotIn(b"PRIVATE_PASSWORD", body)
+                    self.assertNotIn(b"R655TEST1234", body)
+                    self.assertIn(b'probe_success{device="ups"} 0.0', body)
+            self.assertEqual(len(self.FakeCollector.created), 1)
+        finally:
+            self.pool.stop()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_probe_rejects_missing_credentials_without_creating_session(self):
+        server = http_server(self.pool, "127.0.0.1", 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        local = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                local.open(f"http://127.0.0.1:{server.server_port}/probe?sn=R655TEST1234", timeout=2)
+            self.assertEqual(error.exception.code, 400)
+            self.assertEqual(self.FakeCollector.created, [])
+        finally:
+            self.pool.stop()
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)

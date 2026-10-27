@@ -9,12 +9,12 @@
 ```text
 RIVER 3 UPS（R655）
   → EcoFlow 中國區 App 雲端 MQTT（TLS）
-  → ecoflow-exporter:9098/metrics
+  → ecoflow-exporter:9098/probe
   → vmagent
   → VictoriaMetrics / vmalert / 通知
 ```
 
-Exporter 在背景維持一條 MQTT session；HTTP `/metrics` 只讀記憶體，不會因每次 scrape 登入或請求設備。
+Exporter 按 target 配置指紋在進程內維持 MQTT session；相同配置的後續 `/probe` 只續租並讀取最近緩存，不會重新登入或新開連接。HTTP `/metrics` 只返回 session pool 統計。
 
 ## 按需補讀
 
@@ -38,7 +38,7 @@ Exporter 不採用固定每 60 秒請求。連線和訂閱成功後：
 
 ## 部署
 
-在專案根目錄執行以下命令。預設埠為 9098。Compose 從 GHCR 拉取已發布映像；帳密可用環境變數或 `_FILE` secrets。vmagent 只抓 `/metrics`，不持有 EcoFlow 帳密。
+在專案根目錄執行以下命令。預設埠為 9098。Compose 從 GHCR 拉取已發布映像；每個 target 的帳密與 SN 由 vmagent `/probe` 配置傳入。相同配置會復用進程內 MQTT session，閒置 TTL 到期後才關閉。
 
 ```sh
 cp .env.example .env
@@ -47,7 +47,7 @@ docker compose pull
 docker compose up -d
 ```
 
-密碼亦可使用 `compose.secrets.yaml`，避免特殊字元被 `.env` 解析。部署檔未使用 privileged、host network、USB 或藍牙。
+部署檔未使用 privileged、host network、USB 或藍牙。
 
 ## 已知邊界
 

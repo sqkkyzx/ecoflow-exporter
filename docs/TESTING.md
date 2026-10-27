@@ -22,7 +22,7 @@ python -m unittest discover -s probe/ecoflow-wifi-cloud-probe -p 'test_*.py' -v
 
 根目錄的 `test_exporter.py`、`test_metrics.py` 共覆蓋：
 
-- 25 項 exporter／metrics／HTTP／MQTT mock 測試通過。
+- 32 項 exporter／metrics／HTTP／MQTT mock 測試通過，包含 `/probe` 配置解析、session 復用、並發去重和 idle TTL 回收。
 - secrets 不進 metrics、日誌或設定 repr。
 - 快取／retained 不刷新即時值。
 - 必要 SOC／AC flag 缺失會觸發 recovery。
@@ -40,6 +40,6 @@ python -m unittest discover -v
 
 `validation/live_smoke.py` 使用本機 Keychain 密碼，只在本機進程記憶體中運行；摘要與 metrics 輸出寫入 `work/ecoflow-live-validation/`，不會改動追蹤中的檔案。執行前需在 macOS 設定本機 Keychain profile。
 
-已完成 150 秒本機 HTTP 測試：15 次 `/metrics` scrape、110 MQTT 訊息、85 筆含即時欄位、啟動 GET 1 次、login 1 次、解碼錯誤 0、metrics 未出現帳密或完整 SN。
+既有真實設備測試完成 150 秒、15 次 HTTP scrape、110 MQTT 訊息和 85 筆即時欄位；這份歷史測試早於 `/probe` session pool。2026-10-27 以新 `/probe` 重跑時，請求共 15 次但 EcoFlow login 一直回 network 錯誤，未建立 MQTT session，因此新 session pool 的真實設備驗證未通過。離線測試已驗證 `/probe` session 復用且不回傳 query 中的密碼或 SN。
 
 Docker image build/run 尚未驗證，因本機沒有 Docker CLI/daemon。

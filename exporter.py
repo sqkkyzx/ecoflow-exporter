@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, field
+import hashlib
+import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
@@ -30,6 +32,7 @@ VERSION = "0.1.0"
 LOG = logging.getLogger("ecoflow_exporter")
 API_HOSTS = {"api-cn.ecoflow.com", "api.ecoflow.com", "api-e.ecoflow.com"}
 SOC_KEYS = ("cms_batt_soc", "bms_batt_soc", "bms_heartbeat_display_soc", "bms_heartbeat_soc")
+_SESSION_HASH_KEY = os.urandom(32)
 
 
 class ConfigError(ValueError):
@@ -112,6 +115,72 @@ class Config:
             env_int("ECOFLOW_RECONNECT_MIN_SECONDS", 5, 1, 3600, env),
             env_int("ECOFLOW_RECONNECT_MAX_SECONDS", 300, 1, 86400, env),
             env_int("ECOFLOW_AUTH_RETRY_SECONDS", 300, 30, 86400, env), level,
+        )
+        if result.reconnect_min_seconds > result.reconnect_max_seconds:
+            raise ConfigError("重連最短等待時間不可大於最長等待時間。")
+        return result
+
+    @classmethod
+    def from_probe(cls, params: dict, settings: "ServerConfig"):
+        """Build a target config from one /probe request without using process env credentials."""
+        account = params.get("account")
+        password = params.get("password")
+        sn = params.get("sn")
+        if account is None or password is None or sn is None:
+            raise ConfigError("/probe 需要 account、password 和 sn。")
+        if len(password.encode("utf-8")) > 4096:
+            raise ConfigError("/probe password 超出大小限制。")
+        env = {
+            "ECOFLOW_ACCOUNT": account,
+            "ECOFLOW_PASSWORD": password,
+            "ECOFLOW_SN": sn,
+            "ECOFLOW_DEVICE_NAME": params.get("device_name", "river3"),
+            "ECOFLOW_API_HOST": params.get("api_host", settings.api_host),
+            "EXPORTER_LISTEN": settings.listen,
+            "EXPORTER_PORT": settings.port,
+            "ECOFLOW_STALE_SECONDS": settings.stale_seconds,
+            "ECOFLOW_READ_COOLDOWN_SECONDS": settings.read_cooldown_seconds,
+            "ECOFLOW_RECONNECT_MIN_SECONDS": settings.reconnect_min_seconds,
+            "ECOFLOW_RECONNECT_MAX_SECONDS": settings.reconnect_max_seconds,
+            "ECOFLOW_AUTH_RETRY_SECONDS": settings.auth_retry_seconds,
+            "LOG_LEVEL": settings.log_level,
+        }
+        return cls.from_env(env)
+
+
+@dataclass(frozen=True)
+class ServerConfig:
+    api_host: str = "api-cn.ecoflow.com"
+    listen: str = "0.0.0.0"
+    port: int = 9098
+    stale_seconds: int = 120
+    read_cooldown_seconds: int = 30
+    reconnect_min_seconds: int = 5
+    reconnect_max_seconds: int = 300
+    auth_retry_seconds: int = 300
+    session_ttl_seconds: int = 300
+    max_sessions: int = 16
+    log_level: str = "INFO"
+
+    @classmethod
+    def from_env(cls, env=None):
+        env = os.environ if env is None else env
+        host = env.get("ECOFLOW_API_HOST", "api-cn.ecoflow.com").strip().lower()
+        if host not in API_HOSTS:
+            raise ConfigError("ECOFLOW_API_HOST 不在支援的 EcoFlow API 主機清單。")
+        level = env.get("LOG_LEVEL", "INFO").upper()
+        if level not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
+            raise ConfigError("LOG_LEVEL 必須為 DEBUG／INFO／WARNING／ERROR。")
+        result = cls(
+            host, env.get("EXPORTER_LISTEN", "0.0.0.0"),
+            env_int("EXPORTER_PORT", 9098, 1, 65535, env),
+            env_int("ECOFLOW_STALE_SECONDS", 120, 10, 3600, env),
+            env_int("ECOFLOW_READ_COOLDOWN_SECONDS", 30, 5, 3600, env),
+            env_int("ECOFLOW_RECONNECT_MIN_SECONDS", 5, 1, 3600, env),
+            env_int("ECOFLOW_RECONNECT_MAX_SECONDS", 300, 1, 86400, env),
+            env_int("ECOFLOW_AUTH_RETRY_SECONDS", 300, 30, 86400, env),
+            env_int("ECOFLOW_SESSION_TTL_SECONDS", 300, 30, 86400, env),
+            env_int("ECOFLOW_MAX_SESSIONS", 16, 1, 1024, env), level,
         )
         if result.reconnect_min_seconds > result.reconnect_max_seconds:
             raise ConfigError("重連最短等待時間不可大於最長等待時間。")
@@ -450,20 +519,180 @@ class Collector:
             self.stop_event.wait(wait)
 
 
-def http_server(collector: Collector, host: str, port: int):
+def config_fingerprint(config: Config) -> str:
+    """Return an internal keyed fingerprint without exposing a password verifier."""
+    parts = (config.api_host, config.account, config.password, config.sn)
+    encoded = b"".join(len(part.encode()).to_bytes(4, "big") + part.encode() for part in parts)
+    return hmac.new(_SESSION_HASH_KEY, encoded, hashlib.sha256).hexdigest()
+
+
+@dataclass
+class _SessionEntry:
+    collector: Collector
+    last_used: float
+
+
+class SessionPool:
+    """Keep one background MQTT collector per credential/device configuration."""
+
+    def __init__(self, settings: ServerConfig, *, collector_factory=Collector, clock=time.monotonic):
+        self.settings = settings
+        self.collector_factory = collector_factory
+        self.clock = clock
+        self.lock = threading.RLock()
+        self.sessions: dict[str, _SessionEntry] = {}
+        self.stop_event = threading.Event()
+        self.janitor: threading.Thread | None = None
+        self.created_total = 0
+        self.reused_total = 0
+        self.evicted_total = 0
+
+    def start(self):
+        if self.janitor is None:
+            self.janitor = threading.Thread(target=self._reap_loop, name="ecoflow-session-reaper", daemon=True)
+            self.janitor.start()
+
+    def get(self, config: Config) -> Collector:
+        key = config_fingerprint(config)
+        evicted = []
+        with self.lock:
+            now = self.clock()
+            entry = self.sessions.get(key)
+            if entry is not None:
+                if now - entry.last_used < self.settings.session_ttl_seconds:
+                    entry.last_used = now
+                    self.reused_total += 1
+                    return entry.collector
+                del self.sessions[key]
+                evicted.append(entry.collector)
+                self.evicted_total += 1
+            if len(self.sessions) >= self.settings.max_sessions:
+                old_key, old_entry = min(self.sessions.items(), key=lambda item: item[1].last_used)
+                del self.sessions[old_key]
+                evicted.append(old_entry.collector)
+                self.evicted_total += 1
+            collector = self.collector_factory(config)
+            self.sessions[key] = _SessionEntry(collector, now)
+            self.created_total += 1
+            collector.start()
+        self._stop_async(evicted)
+        return collector
+
+    def snapshot(self, config: Config) -> dict:
+        collector = self.get(config)
+        snapshot = collector.snapshot()
+        # The session key deliberately excludes device_name; labels are per request.
+        snapshot["device"] = config.device_name
+        snapshot["probe_success"] = collector.ready()
+        return snapshot
+
+    def reap(self) -> int:
+        expired = []
+        cutoff = self.clock() - self.settings.session_ttl_seconds
+        with self.lock:
+            for key, entry in list(self.sessions.items()):
+                if entry.last_used <= cutoff:
+                    expired.append(entry.collector)
+                    del self.sessions[key]
+        for collector in expired:
+            collector.stop()
+        with self.lock:
+            self.evicted_total += len(expired)
+        return len(expired)
+
+    @staticmethod
+    def _stop_async(collectors):
+        for collector in collectors:
+            threading.Thread(target=collector.stop, name="ecoflow-session-stop", daemon=True).start()
+
+    def metrics(self) -> bytes:
+        with self.lock:
+            active, created, reused, evicted = len(self.sessions), self.created_total, self.reused_total, self.evicted_total
+        return (
+            "# HELP ecoflow_exporter_sessions Active cached MQTT sessions.\n"
+            "# TYPE ecoflow_exporter_sessions gauge\n"
+            f"ecoflow_exporter_sessions {active}\n"
+            "# HELP ecoflow_exporter_sessions_created_total MQTT sessions created.\n"
+            "# TYPE ecoflow_exporter_sessions_created_total counter\n"
+            f"ecoflow_exporter_sessions_created_total {created}\n"
+            "# HELP ecoflow_exporter_sessions_reused_total Probe requests reusing cached MQTT sessions.\n"
+            "# TYPE ecoflow_exporter_sessions_reused_total counter\n"
+            f"ecoflow_exporter_sessions_reused_total {reused}\n"
+            "# HELP ecoflow_exporter_sessions_evicted_total MQTT sessions stopped after idle timeout or capacity eviction.\n"
+            "# TYPE ecoflow_exporter_sessions_evicted_total counter\n"
+            f"ecoflow_exporter_sessions_evicted_total {evicted}\n"
+        ).encode()
+
+    def _reap_loop(self):
+        interval = min(30.0, max(1.0, self.settings.session_ttl_seconds / 2))
+        while not self.stop_event.wait(interval):
+            self.reap()
+
+    def stop(self):
+        self.stop_event.set()
+        if self.janitor is not None:
+            self.janitor.join(timeout=2)
+        with self.lock:
+            collectors = [entry.collector for entry in self.sessions.values()]
+            self.sessions.clear()
+        for collector in collectors:
+            collector.stop()
+
+
+def _query_params(path: str) -> dict:
+    parsed = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query, keep_blank_values=True)
+    allowed = {"account", "password", "sn", "api_host", "device_name"}
+    if not set(parsed) <= allowed:
+        raise ConfigError("/probe 包含未知參數。")
+    result = {}
+    for name, values in parsed.items():
+        if len(values) != 1:
+            raise ConfigError("/probe 每個參數只能提供一次。")
+        result[name] = values[0]
+    return result
+
+
+def http_server(collector_or_pool, host: str, port: int):
+    pool = collector_or_pool if isinstance(collector_or_pool, SessionPool) else None
+    collector = collector_or_pool if pool is None else None
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
+            if len(self.path) > 8192:
+                self.reply(414, b"request URI too long\n")
+                return
             path = urllib.parse.urlsplit(self.path).path
-            if path == "/metrics":
+            if path == "/probe" and pool is not None:
+                try:
+                    config = Config.from_probe(_query_params(self.path), pool.settings)
+                    body = render_metrics(pool.snapshot(config))
+                except ConfigError:
+                    self.reply(400, b"invalid probe configuration\n")
+                    return
+                except Exception as exc:
+                    LOG.error("Probe request failed type=%s", type(exc).__name__)
+                    self.reply(503, b"probe unavailable\n")
+                    return
+                self.reply(200, body, "text/plain; version=0.0.4; charset=utf-8")
+            elif path == "/metrics" and pool is not None:
+                self.reply(200, pool.metrics(), "text/plain; version=0.0.4; charset=utf-8")
+            elif path == "/metrics" and collector is not None:
                 self.reply(200, render_metrics(collector.snapshot()), "text/plain; version=0.0.4; charset=utf-8")
             elif path == "/healthz":
-                alive = collector.thread.is_alive() and not collector.stop_event.is_set()
+                alive = ((pool is not None and not pool.stop_event.is_set()) or
+                         (collector is not None and collector.thread.is_alive() and not collector.stop_event.is_set()))
                 self.reply(200 if alive else 503, b"ok\n" if alive else b"collector stopped\n")
             elif path == "/readyz":
-                ready = collector.ready()
+                if pool is not None:
+                    with pool.lock:
+                        collectors = [entry.collector for entry in pool.sessions.values()]
+                    ready = any(item.ready() for item in collectors)
+                else:
+                    ready = collector.ready()
                 self.reply(200 if ready else 503, b"ready\n" if ready else b"waiting for fresh SOC and AC flag\n")
             elif path == "/":
-                self.reply(200, b"EcoFlow exporter: /metrics /healthz /readyz\n")
+                endpoint = b"/probe /healthz /readyz" if pool is not None else b"/metrics /healthz /readyz"
+                self.reply(200, b"EcoFlow exporter: " + endpoint + b"\n")
             else:
                 self.reply(404, b"not found\n")
 
@@ -485,28 +714,28 @@ def http_server(collector: Collector, host: str, port: int):
 
 def main():
     try:
-        config = Config.from_env()
+        settings = ServerConfig.from_env()
     except ConfigError as exc:
         print(f"Configuration error: {exc}", flush=True)
         return 2
-    logging.basicConfig(level=config.log_level, format="%(asctime)s %(levelname)s %(message)s")
-    collector = Collector(config)
+    logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(message)s")
+    pool = SessionPool(settings)
     try:
-        server = http_server(collector, config.listen, config.port)
+        server = http_server(pool, settings.listen, settings.port)
     except OSError:
         LOG.error("Cannot bind exporter HTTP port")
         return 2
     for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda signum, frame: collector.stop_event.set())
-    collector.start()
+        signal.signal(sig, lambda signum, frame: pool.stop_event.set())
+    pool.start()
     http_thread = threading.Thread(target=server.serve_forever, name="metrics-http", daemon=True)
     http_thread.start()
-    LOG.info("EcoFlow exporter %s listening on port %d", VERSION, config.port)
+    LOG.info("EcoFlow exporter %s listening on port %d", VERSION, settings.port)
     try:
-        while not collector.stop_event.wait(1):
+        while not pool.stop_event.wait(1):
             pass
     finally:
-        collector.stop()
+        pool.stop()
         server.shutdown()
         server.server_close()
         http_thread.join(timeout=2)
