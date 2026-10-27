@@ -30,7 +30,7 @@ curl -fsS http://127.0.0.1:9098/metrics
 
 Compose 會從公開 GHCR 拉取 `ghcr.io/sqkkyzx/ecoflow-exporter:latest`，不需要 Dockerfile 或本地原始碼。GitHub Actions 會在 `main` 更新時發布 `latest`，並在 `v*` Git tag 時發布對應版本標籤；PR 只建置驗證，不會推送映像。
 
-容器使用 UID/GID 10001、唯讀檔案系統，移除 Linux capabilities，無需特權模式、藍牙、USB 或 host network。映像內只複製程式與協議 schema，不包含 `.env`、secrets 或測試結果。
+映像以非 root 使用者執行，不需要特權模式、藍牙、USB 或 host network。映像內只複製程式與協議 schema，不包含 `.env`、secrets 或測試結果。
 
 ## Docker：使用 secrets 檔案
 
