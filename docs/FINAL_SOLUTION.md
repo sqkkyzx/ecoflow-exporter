@@ -38,12 +38,13 @@ Exporter 不採用固定每 60 秒請求。連線和訂閱成功後：
 
 ## 部署
 
-在專案根目錄執行以下命令。預設埠為 9098。帳密可用環境變數或 `_FILE` secrets；vmagent 只抓 `/metrics`，不持有 EcoFlow 帳密。
+在專案根目錄執行以下命令。預設埠為 9098。Compose 從 GHCR 拉取已發布映像；帳密可用環境變數或 `_FILE` secrets。vmagent 只抓 `/metrics`，不持有 EcoFlow 帳密。
 
 ```sh
 cp .env.example .env
 chmod 600 .env
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 密碼亦可使用 `compose.secrets.yaml`，避免特殊字元被 `.env` 解析。部署檔未使用 privileged、host network、USB 或藍牙。

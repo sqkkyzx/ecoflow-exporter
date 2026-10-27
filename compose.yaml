@@ -1,8 +1,7 @@
 services:
   ecoflow-exporter:
-    build:
-      context: .
     image: ghcr.io/sqkkyzx/ecoflow-exporter:latest
+    pull_policy: always
     restart: unless-stopped
     init: true
     user: "10001:10001"
@@ -15,9 +14,9 @@ services:
     ports:
       - "${EXPORTER_BIND_ADDRESS:-0.0.0.0}:${EXPORTER_PORT:-9098}:${EXPORTER_PORT:-9098}"
     environment:
-      ECOFLOW_ACCOUNT: ${ECOFLOW_ACCOUNT:-}
-      ECOFLOW_PASSWORD: ${ECOFLOW_PASSWORD:-}
-      ECOFLOW_SN: ${ECOFLOW_SN:-}
+      ECOFLOW_ACCOUNT: ${ECOFLOW_ACCOUNT:?Set ECOFLOW_ACCOUNT in .env}
+      ECOFLOW_PASSWORD: ${ECOFLOW_PASSWORD:?Set ECOFLOW_PASSWORD in .env}
+      ECOFLOW_SN: ${ECOFLOW_SN:?Set ECOFLOW_SN in .env}
       ECOFLOW_DEVICE_NAME: ${ECOFLOW_DEVICE_NAME:-river3}
       ECOFLOW_API_HOST: ${ECOFLOW_API_HOST:-api-cn.ecoflow.com}
       EXPORTER_PORT: ${EXPORTER_PORT:-9098}

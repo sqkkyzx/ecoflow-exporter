@@ -21,22 +21,14 @@ chmod 600 .env
 
 編輯 `.env`，填入 `ECOFLOW_ACCOUNT`（中國區手機號）、`ECOFLOW_PASSWORD`（App 帳號密碼，非短信驗證碼）和 `ECOFLOW_SN`（完整設備序號）。範例未包含任何真實帳密或 SN；Mac 測試工具的鑰匙圈資料不會自動打包進容器。
 
-密碼含 `$`、`#` 或引號時，建議使用下方 secrets 檔案方式，避免 `.env` 轉義或插值改變密碼。
-
 ```sh
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 docker compose logs -f ecoflow-exporter
 curl -fsS http://127.0.0.1:9098/metrics
 ```
 
-要使用 GitHub Container Registry 發布的映像，改為：
-
-```sh
-docker compose pull
-docker compose up -d --no-build
-```
-
-發布標籤包括 `latest`（僅 `main`）、`main`、Git tag（例如 `v0.1.0`）及 `sha-<commit>`。PR 只建置驗證，不會推送映像。GHCR 映像：[`ghcr.io/sqkkyzx/ecoflow-exporter`](https://ghcr.io/sqkkyzx/ecoflow-exporter)。
+Compose 會從公開 GHCR 拉取 `ghcr.io/sqkkyzx/ecoflow-exporter:latest`，不需要 Dockerfile 或本地原始碼。GitHub Actions 會在 `main` 更新時發布 `latest`，並在 `v*` Git tag 時發布對應版本標籤；PR 只建置驗證，不會推送映像。
 
 容器使用 UID/GID 10001、唯讀檔案系統，移除 Linux capabilities，無需特權模式、藍牙、USB 或 host network。映像內只複製程式與協議 schema，不包含 `.env`、secrets 或測試結果。
 
@@ -59,12 +51,13 @@ IFS= read -r ECOFLOW_SN_VALUE
 printf '%s' "$ECOFLOW_SN_VALUE" > secrets/sn
 unset ECOFLOW_ACCOUNT_VALUE ECOFLOW_PASSWORD_VALUE ECOFLOW_SN_VALUE
 chmod 444 secrets/account secrets/password secrets/sn
-docker compose -f compose.secrets.yaml up -d --build
+docker compose -f compose.secrets.yaml pull
+docker compose -f compose.secrets.yaml up -d
 ```
 
 `secrets/` 目錄的 0700 限制主機其他使用者存取；檔案 0444 讓容器內非 root 的 UID 10001 能讀取掛載內容。Compose 的檔案型 secrets 使用 bind mount，不應依賴 uid／mode 欄位重新映射主機檔案權限。這些檔案不會進入映像。
 
-密碼檔內容完整保留，不自動移除頭尾空白或換行；若用 `echo` 建檔，多出的換行會成為密碼的一部分。帳號、密碼、SN 各自支援直接值或 `_FILE`，同一項不得兩者並存。
+密碼檔內容完整保留，不自動移除頭尾空白或換行；若用 `echo` 建檔，多出的換行會成為密碼的一部分。使用 secrets 版本時不要與 `compose.yaml` 疊加。
 
 ## vmagent
 
